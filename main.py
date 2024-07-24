@@ -4,15 +4,15 @@ import sys
 
 
 def main():
-    address_to_binary("127.0.0.1")
-    encoded_packet = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, 0, 0b0010, 500, "Hello World!")
-    packet = struct.unpack("!IIHHIIBH24s", encoded_packet)
-    print(packet)
-    # app_type = sys.argv[1]
-    # if app_type == "server":
-    #     init_server(int(sys.argv[2]))
-    # elif app_type == "client":
-    #     init_client("127.0.0.1", int(sys.argv[2]), sys.argv[3], int(sys.argv[4]))
+    # address_to_binary("127.0.0.1")
+    # encoded_packet = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, 0, 0b0010, 500, "Hello World!")
+    # packet = struct.unpack("!IIHHIIBH24s", encoded_packet)
+    # print(packet)
+    app_type = sys.argv[1]
+    if app_type == "server":
+        init_server(int(sys.argv[2]))
+    elif app_type == "client":
+        init_client("127.0.0.1", int(sys.argv[2]), sys.argv[3], int(sys.argv[4]))
 
 
 def init_client(host: str, port: int, dest_host: str, dest_port: int):
@@ -62,6 +62,7 @@ class Server:
 
     def listen(self, host: str, port: int):
         self.socket.bind((host, port))
+        print("Server is listening in port:", port)
         while True:
             data, sender = self.socket.recvfrom(4096)
             self.unpack(data, sender)
@@ -71,7 +72,7 @@ class Server:
     def unpack(self, encoded_packet: bytes, sender):
         data = struct.unpack("!IIHHIIBH24s", encoded_packet)
         print("Received from buffer: ", data)
-        newmsg = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, 0, 0b0010, 500, "Hello World!")
+        newmsg = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, 0, 0b0110, 500, "Hello World!")
         self.socket.sendto(newmsg, sender)
 
 class Client:
@@ -80,6 +81,7 @@ class Client:
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
         self.socket.bind((host, port))
+        print("Binding with host")
         # After binding, proceed to handshaking
         syn = attach_headers(host, dest_host, port, dest_port, 0, 0, 0b0010, 0)
         self.send(syn, dest_host, dest_port, True)
@@ -91,13 +93,14 @@ class Client:
             self.socket.sendto(packet, (dest_host, dest_port))
 
     def send(self, msg: bytes, dest_host: str, dest_port: int, wait_for_ack: bool):
-        self.socket.sendto(msg, dest_host, dest_port)
+        print("Message being sent is: ", msg)
+        self.socket.sendto(msg, (dest_host, dest_port))
         print("Client sent SYN")
         ack = not wait_for_ack
         while not ack:
             msg, _ = self.socket.recvfrom(4096)
             if msg:
-                unpacked_msg = struct.unpack("!IIHHIIBHp", msg)
+                unpacked_msg = struct.unpack("!IIHHIIBH24s", msg)
                 print(unpacked_msg)
                 ack = True
 
@@ -132,7 +135,7 @@ Receiving:
 
 """
 running client:
-python3 main.py client 8001 localhost 8000
+python3 main.py client 8001 127.0.0.1 8000
 
 python3 main.py client <port> <dest_host> <dest_port> 
 
