@@ -47,12 +47,14 @@ def init_server(port: int):
 def divide_binary_string(s: str, n: int):
     return [s[i:i+n] for i in range(0, len(s), n)]
 
-def split_packets(data: str, mss: int, buffer: list[bytes]) -> list[bytes]:
+def split_packets(data: str, buffer: list[bytes]) -> list[bytes]:
     print("Splits data into bytes to fit it in the array")
+    buffer = divide_binary_string(data.encode(), 8)
+    buffer.append('\r'.encode())
+    return buffer
     # Iterate through message, dividing it into bytes, adding each byte to the array
     # Try not to overflow buffer
     # How do we know what can we overwrite?
-    # 
 
 def address_to_binary(address: str):
     nums = address.split(".")
@@ -107,6 +109,7 @@ class Server:
     def __init__(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         connections = {}
+        # How do we track the seq nums and ACK? Like do we do for diff connections?
 
     def listen(self, host: str, port: int):
         self.socket.bind((host, port))
@@ -143,6 +146,7 @@ class Client:
     def __init__(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         buffer = [0b00000000] # * SeqNums
+
         # Track seq nums and ACK #
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
@@ -155,6 +159,8 @@ class Client:
         self.send(ack, dest_host, dest_port, False)
         while True:
             val = input("msg: ")
+# -------------------------Split packets here----------------------------------------
+            buffer = split_packets(val, self.buffer)
             packet = attach_headers(host, dest_host, port, dest_port, 0, 0, 0b0100, 0, val)
             self.socket.sendto(packet, (dest_host, dest_port))
 
