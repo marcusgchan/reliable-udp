@@ -1,6 +1,26 @@
 import socket
 import struct
 import sys
+from dataclasses import dataclass
+
+@dataclass
+class Flag:
+    push: bool
+    ack: bool
+    syn: bool
+    fin: bool
+
+@dataclass
+class Header:
+    src_addr: str
+    dst_addr: str
+    src_port: int
+    dst_port: int
+    seq_num: int
+    ack_num: int
+    flags: Flag
+    window: int
+    checksum: int
 
 
 def main():
@@ -24,8 +44,15 @@ def init_server(port: int):
     server = Server()
     server.listen("127.0.0.1", port)
 
-def split_packets(data: str, mss: int) -> list[str]:
-    print("Splits data based on the MSS")
+def divide_binary_string(s: str, n: int):
+    return [s[i:i+n] for i in range(0, len(s), n)]
+
+def split_packets(data: str, mss: int, buffer: list[bytes]) -> list[bytes]:
+    print("Splits data into bytes to fit it in the array")
+    # Iterate through message, dividing it into bytes, adding each byte to the array
+    # Try not to overflow buffer
+    # How do we know what can we overwrite?
+    # 
 
 def address_to_binary(address: str):
     nums = address.split(".")
@@ -33,32 +60,53 @@ def address_to_binary(address: str):
     for num in nums:
         binary += format(int(num), '08b')
         # would have to attach the binary to each binary, we can also just do something else
-    print(binary)
-    print(int(binary, 2))
-    print(bin(int(binary, 2)))
     return int(binary, 2)
 
 def binary_to_address(data: int) -> str:
-    binary_string = bin(data)[2:]
-    return binary_string
+    binary_string = bin(data)[2:].zfill(32) #32 bits
+    substr = divide_binary_string(binary_string, 8)
+    addresses = [str(int(b, 2)) for b in substr]
+    # Join the decimal numbers with a period
+    return '.'.join(addresses)
 
 def attach_headers(src_addr: str, dst_addr: str, src_port: int, dst_port: int, seq: int, ack: int, flags: bytes, window: int, msg="") -> bytes:
-    # Header is: Src_addr(32), Dst_addr(32), Src_port(16), Dst_port(16), seq #(32), ack #(32), Flags(8), Window(16), Length (16)
+    # Header is: Src_addr(32), Dst_addr(32), Src_port(16), Dst_port(16), seq #(32), ack #(32), Flags(8), Window(16), checksum (16)
     bin_src = address_to_binary(src_addr)
     bin_dst = address_to_binary(dst_addr)
-    header = struct.pack("!IIHHIIBH", bin_src, bin_dst, src_port, dst_port, seq, ack, flags, window)
-    # Here we would add the data
+    # -------------------------Calculate checksum here----------------------------------------
+    checksum = 0
+    header = struct.pack("!IIHHIIBHH", bin_src, bin_dst, src_port, dst_port, seq, ack, flags, window, checksum)
     data = struct.pack("24s", msg.encode('utf-8')) # instead of 24 it would be the MSS
     packet = header + data
-    # print("Header: ", header)
-    # print("Message: ", msg.encode('utf-8'))
-    # print("Data: ", data)
-    # print("Packet: ", packet)
     return packet
+
+def read_headers(data: bytes):
+    #Src_addr, Dst_addr, Src_port, Dst_port, seq #(32), ack #(32), Flags(8), Window(16), checksum
+    headers = Header
+    headers.src_addr = binary_to_address(data[0])
+    headers.dst_addr = binary_to_address(data[1])
+    headers.src_port = data[2]
+    headers.dst_port = data[3]
+    headers.seq_num = data[4]
+    headers.ack_num = data[5]
+    flags_bin = bin(data[6])
+    flags = Flag
+    flags.push = flags_bin[-4] == '1'
+    flags.ack = flags_bin[-3] == '1'
+    flags.syn = flags_bin[-2] == '1'
+    flags.fin = flags_bin[-1] == '1'
+    headers.flags = flags
+    headers.window = data[7]
+    headers.checksum = data[8]
+    print("Received from address (in read_headers): ", headers.src_addr)
+    print("Received to current (in read_headers): ", headers.dst_addr)
+    print("Flags (in read_headers): ", flags)
+    return headers, data[9].decode()
 
 class Server:
     def __init__(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        connections = {}
 
     def listen(self, host: str, port: int):
         self.socket.bind((host, port))
@@ -66,18 +114,36 @@ class Server:
         while True:
             data, sender = self.socket.recvfrom(4096)
             self.unpack(data, sender)
-            print("data", data)
-            print("sender", sender)
+            print("Sender: ", sender)
 
     def unpack(self, encoded_packet: bytes, sender):
-        data = struct.unpack("!IIHHIIBH24s", encoded_packet)
+        data = struct.unpack("!IIHHIIBHH24s", encoded_packet)
         print("Received from buffer: ", data)
+        # Read headers
+        headers, msg = read_headers(data)
+        print("Received message from Client:", msg)
+        # Check Source address and source port to see if a connection has been established already
+        # -------------------------Check checksum here----------------------------------------
+        """
+        Checksum is all good, so we need to check what the headers say.
+        -> Case 1: syn flag is true. Send back SYNACK and wait for ACK to safe this connection.
+        -> Case 2: ack flag is true. We check ack# and seq# to see what it tracks back to.
+        
+        """
+        if headers.flags.syn:
+            print("RECEIVED A SYN")
+            newmsg = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, 0, 0b0110, 500, "Sending SYNACK")
+            self.socket.sendto(newmsg, sender)
+            return
+        print("RECEIVED AN ACK")
         newmsg = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, 0, 0b0110, 500, "Hello World!")
         self.socket.sendto(newmsg, sender)
 
 class Client:
     def __init__(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        buffer = [0b00000000] # * SeqNums
+        # Track seq nums and ACK #
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
         self.socket.bind((host, port))
@@ -95,13 +161,15 @@ class Client:
     def send(self, msg: bytes, dest_host: str, dest_port: int, wait_for_ack: bool):
         print("Message being sent is: ", msg)
         self.socket.sendto(msg, (dest_host, dest_port))
-        print("Client sent SYN")
         ack = not wait_for_ack
         while not ack:
             msg, _ = self.socket.recvfrom(4096)
             if msg:
-                unpacked_msg = struct.unpack("!IIHHIIBH24s", msg)
-                print(unpacked_msg)
+                unpacked_msg = struct.unpack("!IIHHIIBHH24s", msg)
+                headers, msg_rcvd = read_headers(unpacked_msg)
+                print("Headers received by client: ", headers)
+                print("Message received by client: ", msg_rcvd)
+        # -------------------------Check ACK corresponds here----------------------------------------
                 ack = True
 
 """
