@@ -163,10 +163,11 @@ class Client:
             val = input("msg: ")
 # -------------------------Split packets here----------------------------------------
             buffer = split_packets(val, self.buffer)
+# -------------------------Loop through buffer here----------------------------------------
             msg = buffer[self.last_seq_num:self.last_seq_num+self.mss]
             # Increase Seq num and increase ack num
             packet = attach_headers(host, dest_host, port, dest_port, self.last_seq_num, self.last_ack_num, 0b0100, 0, msg)
-            self.socket.sendto(packet, (dest_host, dest_port))
+            self.send(packet, dest_host, dest_port)
 
     def send(self, msg: bytes, dest_host: str, dest_port: int, wait_for_ack: bool):
         print("Message being sent is: ", msg)
