@@ -179,6 +179,9 @@ class Client:
                 headers, msg_rcvd = read_headers(unpacked_msg)
                 print("Headers received by client: ", headers)
                 print("Message received by client: ", msg_rcvd)
+                # check for synack
+                if headers.flags.syn and headers.flags.ack:
+                    print("Synack is good!")
         # -------------------------Check ACK corresponds here----------------------------------------
                 ack = True
 
