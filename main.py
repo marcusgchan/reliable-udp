@@ -47,7 +47,7 @@ def init_server(port: int):
 def divide_binary_string(s: str, n: int):
     return [s[i:i+n] for i in range(0, len(s), n)]
 
-def split_packets(data: str, buffer: list[bytes]) -> list[bytes]:
+def split_packets(data: str, buffer: list[bytes], seq_num: int) -> list[bytes]:
     print("Splits data into bytes to fit it in the array")
     buffer = divide_binary_string(data.encode(), 8)
     buffer.append('\r'.encode())
@@ -146,7 +146,9 @@ class Client:
     def __init__(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         buffer = [0b00000000] # * SeqNums
-
+        last_seq_num = 0
+        last_ack_num = 0
+        mss = 60  # we can set the MSS using a flag from the server but yeah
         # Track seq nums and ACK #
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
@@ -161,7 +163,9 @@ class Client:
             val = input("msg: ")
 # -------------------------Split packets here----------------------------------------
             buffer = split_packets(val, self.buffer)
-            packet = attach_headers(host, dest_host, port, dest_port, 0, 0, 0b0100, 0, val)
+            msg = buffer[self.last_seq_num:self.last_seq_num+self.mss]
+            # Increase Seq num and increase ack num
+            packet = attach_headers(host, dest_host, port, dest_port, self.last_seq_num, self.last_ack_num, 0b0100, 0, msg)
             self.socket.sendto(packet, (dest_host, dest_port))
 
     def send(self, msg: bytes, dest_host: str, dest_port: int, wait_for_ack: bool):
