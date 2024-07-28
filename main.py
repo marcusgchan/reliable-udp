@@ -160,9 +160,12 @@ class Client:
         self.stream_mut = threading.Lock()
         self.stream_index = 0
 
-        self.waiting_packets: dict[int, bytes] = {} # waiting to be acked
+        self.waiting_packets: dict[int, tuple[bytes, socket._Address]] = {} # waiting to be acked
         self.waiting_packets_mut = threading.Lock()
         self.waiting_packets_sig = threading.Event()
+
+        self.timer = threading.Timer(0.9, self.handle_timer)
+        self.timer_mut = threading.Lock()
 
         self.init_seq_num = 0
 
@@ -216,13 +219,30 @@ class Client:
                     packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
 
                     # packet_seq_num + len(body) is min ack that will acknowledge the packet
-                    self.waiting_packets[packet_seq_num + len(body)] = packet
+                    self.waiting_packets[packet_seq_num + len(body)] = packet, (dest_host, dest_port)
 
                 packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
 
-                print("sending data", body)
+                # print("sending data", body)
                 self.socket.sendto(packet, (dest_host, dest_port))
 
+                with self.timer_mut:
+                    if i == 0 and not self.timer.is_alive():
+                        self.timer = threading.Timer(0.9, self.handle_timer)
+                        self.timer.start()
+                        print("Starting timer in send")
+
+
+    def handle_timer(self):
+        print("Timer ran out... Resending packets")
+        with self.waiting_packets_mut:
+            for _, value in self.waiting_packets.items():
+                packet, address = value
+                self.socket.sendto(packet, address)
+
+        with self.timer_mut:
+            self.timer = threading.Timer(0.9, self.handle_timer)
+            self.timer.start()
 
     def handle_acks(self):
         while True:
@@ -236,14 +256,22 @@ class Client:
 
             with self.waiting_packets_mut:
                 print("received ack", ack_num)
-                print(self.waiting_packets)
                 self.seq_num = ack_num
                 keys_to_remove = [key for key in self.waiting_packets if key <= ack_num]
                 for key in keys_to_remove:
                     del self.waiting_packets[key]
-                print("end", self.waiting_packets)
 
             self.waiting_packets_sig.set()
+
+            with self.waiting_packets_mut:
+                if len(self.waiting_packets) > 0:
+                    print("Restarting timer after receiving ack")
+                    with self.timer_mut:
+                        self.timer.cancel()
+                        self.timer = threading.Timer(0.9, self.handle_timer)
+                        self.timer.start()
+                else:
+                    self.timer.cancel()
 
     def handle_input(self):
         while True:
