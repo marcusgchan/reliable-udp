@@ -147,7 +147,7 @@ class Server:
                 buffer = b""
 
             # Send ack
-            ack_packet = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, headers.seq_num + len(raw_data), b'0010', 500)
+            ack_packet = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, headers.seq_num + len(raw_data), b'0100', 500)
             self.socket.sendto(ack_packet, sender)
 
 
@@ -159,9 +159,12 @@ class Client:
         self.stream_index = 0
 
         self.waiting_packets: dict[int, bytes] = {} # waiting to be acked
+        self.waiting_packets_mut = threading.Lock()
 
         self.init_seq_num = 0
+
         self.seq_num = 0
+
         self.ack_num = 0
         self.window_size = 6
         self.mss = 2  # we can set the MSS using a flag from the server but yeah
@@ -180,7 +183,7 @@ class Client:
 
         # Spawn new thread for receving acks
         recv_thread = threading.Thread(target=self.handle_acks)
-        # recv_thread.start()
+        recv_thread.start()
 
         while True:
             val = input("msg: ")
@@ -189,29 +192,49 @@ class Client:
             self.stream.write(input_bytes)
             self.stream.seek(self.stream_index)
 
-            num_of_packets = self.window_size // self.mss - len(self.waiting_packets)
-            bytes_to_split = self.stream.read(num_of_packets * self.mss)
-            self.stream_index += self.window_size
+            with self.waiting_packets_mut:
+                remaining_spots = self.window_size // self.mss - len(self.waiting_packets)
+            bytes_to_split = self.stream.read(remaining_spots * self.mss)
+            self.stream_index += len(bytes_to_split)
             
+            print("num of packs", remaining_spots)
+            print("read from stream", bytes_to_split)
+            print(0, len(bytes_to_split), self.mss)
             for i in range(0, len(bytes_to_split), self.mss):
                 # print("seq", self.seq_num + len(input_bytes[:i]))
                 body = input_bytes[i:i+self.mss]
-                packet_seq_num = self.seq_num + len(input_bytes[:i])
-                packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
                 
-                # packet_seq_num + len(body) is min ack that will acknowledge the packet
-                self.waiting_packets[packet_seq_num + len(body)] = packet
+                with self.waiting_packets_mut:
+                    packet_seq_num = self.seq_num + len(input_bytes[:i])
+                    packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
+
+                    # packet_seq_num + len(body) is min ack that will acknowledge the packet
+                    self.waiting_packets[packet_seq_num + len(body)] = packet
+
+                packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
 
                 print("sending data", body)
                 self.socket.sendto(packet, (dest_host, dest_port))
 
-            # Increase Seq num and increase ack num
-            # packet = attach_headers(host, dest_host, port, dest_port, self.last_seq_num, self.last_ack_num, 0b0100, 0, msg)
-            # self.send(packet, dest_host, dest_port)
 
     def handle_acks(self):
         while True:
-            raw_data, sender = self.socket.recvfrom(4096)
+            raw_data, _ = self.socket.recvfrom(4096)
+            unpacked_data = struct.unpack("!IIHHII4sHH24s", raw_data)
+            headers, raw_data = read_headers(unpacked_data)
+            if not headers.flags.ack:
+                continue
+
+            ack_num = headers.ack_num
+
+            with self.waiting_packets_mut:
+                print("received ack", ack_num)
+                print(self.waiting_packets)
+                self.seq_num = ack_num
+                keys_to_remove = [key for key in self.waiting_packets if key <= ack_num]
+                for key in keys_to_remove:
+                    del self.waiting_packets[key]
+                print("end", self.waiting_packets)
 
 
     def send(self, msg: bytes, dest_host: str, dest_port: int, wait_for_ack: bool):
