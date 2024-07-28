@@ -162,6 +162,7 @@ class Client:
 
         self.waiting_packets: dict[int, bytes] = {} # waiting to be acked
         self.waiting_packets_mut = threading.Lock()
+        self.waiting_packets_sig = threading.Event()
 
         self.init_seq_num = 0
 
@@ -192,24 +193,20 @@ class Client:
         input_thread.start()
 
         while True:
+            self.waiting_packets_sig.wait()
+
             with self.waiting_packets_mut:
                 remaining_spots = self.window_size // self.mss - len(self.waiting_packets)
 
             with self.stream_mut:
-                print("stream_index", self.stream_index)
                 self.stream.seek(self.stream_index)
-                print("stream", self.stream.getvalue())
                 bytes_to_split = self.stream.read(remaining_spots * self.mss)
                 if len(bytes_to_split) == 0:
-                    # print("empty")
-                    time.sleep(1)
+                    self.waiting_packets_sig.clear()
                     continue
 
             self.stream_index += len(bytes_to_split)
             
-            print("num of packs", remaining_spots)
-            print("read from stream", bytes_to_split)
-            print(0, len(bytes_to_split), self.mss)
             for i in range(0, len(bytes_to_split), self.mss):
                 # print("seq", self.seq_num + len(input_bytes[:i]))
                 body = bytes_to_split[i:i+self.mss]
@@ -246,6 +243,8 @@ class Client:
                     del self.waiting_packets[key]
                 print("end", self.waiting_packets)
 
+            self.waiting_packets_sig.set()
+
     def handle_input(self):
         while True:
             val = input("msg: ")
@@ -254,7 +253,8 @@ class Client:
             
             with self.stream_mut:
                 self.stream.write(input_bytes)
-                print("stream after input", self.stream.getvalue())
+
+            self.waiting_packets_sig.set()
 
 
     def send(self, msg: bytes, dest_host: str, dest_port: int, wait_for_ack: bool):
