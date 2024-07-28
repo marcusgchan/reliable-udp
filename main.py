@@ -1,4 +1,5 @@
 import socket
+import time
 import threading
 import struct
 import sys
@@ -156,6 +157,7 @@ class Client:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         self.stream = io.BytesIO()
+        self.stream_mut = threading.Lock()
         self.stream_index = 0
 
         self.waiting_packets: dict[int, bytes] = {} # waiting to be acked
@@ -185,16 +187,24 @@ class Client:
         recv_thread = threading.Thread(target=self.handle_acks)
         recv_thread.start()
 
-        while True:
-            val = input("msg: ")
-            val += "\r"
-            input_bytes = val.encode()
-            self.stream.write(input_bytes)
-            self.stream.seek(self.stream_index)
+        # Spawn thread for user input
+        input_thread = threading.Thread(target=self.handle_input)
+        input_thread.start()
 
+        while True:
             with self.waiting_packets_mut:
                 remaining_spots = self.window_size // self.mss - len(self.waiting_packets)
-            bytes_to_split = self.stream.read(remaining_spots * self.mss)
+
+            with self.stream_mut:
+                print("stream_index", self.stream_index)
+                self.stream.seek(self.stream_index)
+                print("stream", self.stream.getvalue())
+                bytes_to_split = self.stream.read(remaining_spots * self.mss)
+                if len(bytes_to_split) == 0:
+                    # print("empty")
+                    time.sleep(1)
+                    continue
+
             self.stream_index += len(bytes_to_split)
             
             print("num of packs", remaining_spots)
@@ -202,10 +212,10 @@ class Client:
             print(0, len(bytes_to_split), self.mss)
             for i in range(0, len(bytes_to_split), self.mss):
                 # print("seq", self.seq_num + len(input_bytes[:i]))
-                body = input_bytes[i:i+self.mss]
+                body = bytes_to_split[i:i+self.mss]
                 
                 with self.waiting_packets_mut:
-                    packet_seq_num = self.seq_num + len(input_bytes[:i])
+                    packet_seq_num = self.seq_num + len(bytes_to_split[:i])
                     packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
 
                     # packet_seq_num + len(body) is min ack that will acknowledge the packet
@@ -235,6 +245,16 @@ class Client:
                 for key in keys_to_remove:
                     del self.waiting_packets[key]
                 print("end", self.waiting_packets)
+
+    def handle_input(self):
+        while True:
+            val = input("msg: ")
+            val += "\r"
+            input_bytes = val.encode()
+            
+            with self.stream_mut:
+                self.stream.write(input_bytes)
+                print("stream after input", self.stream.getvalue())
 
 
     def send(self, msg: bytes, dest_host: str, dest_port: int, wait_for_ack: bool):
