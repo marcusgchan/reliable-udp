@@ -1,5 +1,5 @@
 import socket
-import time
+import random
 import threading
 import struct
 import sys
@@ -38,10 +38,6 @@ def main():
     elif app_type == "client":
         init_client("127.0.0.1", int(sys.argv[2]), sys.argv[3], int(sys.argv[4]))
 
-
-# https://stackoverflow.com/questions/30686701/python-get-size-of-string-in-bytes
-def utf8len(s):
-    return len(s.encode('utf-8'))
 
 def init_client(host: str, port: int, dest_host: str, dest_port: int):
     client = Client()
@@ -241,7 +237,7 @@ class Client:
                         self.timer.start()
                         print("Starting timer in send")
 
-                self.sendto(packet, (dest_host, dest_port), i)
+                self.sendto(packet, (dest_host, dest_port))
 
 
     def handle_timer(self):
@@ -301,7 +297,8 @@ class Client:
     Simulate loss
     """
     def sendto(self, readableBuffer: bytes, address: Any, i=0) -> int:
-        if i != 2:
+        randint = random.randint(0, 10)
+        if randint > 5:
             return self.socket.sendto(readableBuffer, address)
         return -1
 
