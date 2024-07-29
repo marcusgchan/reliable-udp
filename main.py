@@ -283,7 +283,6 @@ class Client:
                         ack_num = headers.ack_num
 
                         with self.waiting_packets_mut:
-                            print("received ack", ack_num)
                             keys_to_remove = [key for key in self.waiting_packets if key < ack_num]
                             for key in keys_to_remove:
                                 del self.waiting_packets[key]
