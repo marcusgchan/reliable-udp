@@ -233,7 +233,6 @@ class Client:
                 packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
 
                 with self.waiting_packets_mut:
-                    # packet_seq_num + len(body) is min ack that will acknowledge the packet
                     self.waiting_packets[packet_seq_num] = packet, (dest_host, dest_port)
 
                 with self.timer_mut:
