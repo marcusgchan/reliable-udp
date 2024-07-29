@@ -106,74 +106,7 @@ def read_headers(data: tuple[Any, ...]) -> tuple[Header, bytes]:
         
     return headers, raw_data.rstrip(b"\x00")
 
-class Server:
-    def __init__(self) -> None:
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.next_seq_num = 0
-        self.init_seq_num = 0
-        self.ack_num = 0 # next seq expected from client
-
-        self.timer = threading.Timer(0.9, self.handle_timer)
-
-    def listen(self, host: str, port: int):
-        self.socket.bind((host, port))
-        print("Server is listening in port:", port)
-        buffer:bytes = b""
-        while True:
-            raw_data, sender = self.socket.recvfrom(4096)
-            unpacked_data = struct.unpack("!IIHHII4sHH24s", raw_data)
-            headers, raw_data = read_headers(unpacked_data)
-
-            # Check Source address and source port to see if a connection has been established already
-            # -------------------------Check checksum here----------------------------------------
-            """
-            Checksum is all good, so we need to check what the headers say.
-            -> Case 1: syn flag is true. Send back SYNACK and wait for ACK to safe this connection.
-            -> Case 2: ack flag is true. We check ack# and seq# to see what it tracks back to.
-            
-            """
-            if headers.flags.syn:
-                print("RECEIVED A SYN")
-                synack = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, self.next_seq_num, headers.seq_num + 1, b'0110', 500)
-                self.next_seq_num += 1
-                self.ack_num = headers.seq_num + 1
-                self.socket.sendto(synack, sender)
-                self.timer.start()
-                continue
-
-            if headers.flags.ack and headers.seq_num == self.init_seq_num + 1:
-                print("Established connection with", sender)
-                continue
-
-            print(f"Received packet with seq,", headers.seq_num)
-
-            if headers.seq_num != self.ack_num:
-                print(f"Received unexpected seq_num received={headers.seq_num} expected={self.ack_num}")
-                ack = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, self.ack_num, b'0100', 500)
-                self.socket.sendto(ack, sender)
-                continue
-
-
-            buffer += raw_data
-
-            print("buffer", buffer)
-
-            # Obtained full msg
-            if chr(buffer[-1]) == "\r":
-                print("msg from client:", buffer.decode())
-                buffer = b""
-
-            # Send ack
-            ack_packet = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, headers.seq_num + len(raw_data), b'0100', 500)
-            self.socket.sendto(ack_packet, sender)
-            self.ack_num = headers.seq_num + len(raw_data)
-
-    def handle_timer(self):
-        synack = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, self.init_seq_num, self.ack_num, b'0110', 500)
-        # self.socket.sendto(synack, sender)
         
-
-
 class Client:
     def __init__(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -190,33 +123,34 @@ class Client:
         self.timer_mut = threading.Lock()
 
         self.next_seq_num = 0
+        self.next_seq_num_mut = threading.Lock()
 
         self.init_seq_num = 0
 
         self.ack_num = 0
+        self.init_ack_num = 0
+
+        self.is_connected = False
+        self.is_connected_mut = threading.Lock()
+
+        self.received_syn = False
+
         self.window_size = 6
         self.mss = 2  # we can set the MSS using a flag from the server but yeah
-        # Track seq nums and ACK #
+
+        self.buffer = b""
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
         self.host = host
         self.port = port
+        self.dest_host = dest_host
+        self.dest_port = dest_port
 
         self.socket.bind((host, port))
 
         # Spawn new thread for receving acks
         recv_thread = threading.Thread(target=self.handle_acks)
         recv_thread.start()
-
-        # After binding, proceed to handshaking
-        syn = attach_headers(host, dest_host, port, dest_port, 0, 0, b'0010', 0)
-        with self.waiting_packets_mut:
-            self.waiting_packets[self.next_seq_num] = syn, (dest_host, dest_port)
-            self.next_seq_num += 1
-            self.sendto(syn, (dest_host, dest_port))
-            with self.timer_mut:
-                self.timer = threading.Timer(0.9, self.handle_timer)
-                self.timer.start()
 
         # Spawn thread for user input
         input_thread = threading.Thread(target=self.handle_input)
@@ -241,8 +175,9 @@ class Client:
                 # print("seq", self.seq_num + len(input_bytes[:i]))
                 body = bytes_to_split[i:i+self.mss]
                 
-                packet_seq_num = self.next_seq_num
-                self.next_seq_num += len(body)
+                with self.next_seq_num_mut:
+                    packet_seq_num = self.next_seq_num
+                    self.next_seq_num += len(body)
 
                 print(f"sending data={body} seq_num={packet_seq_num}")
 
@@ -277,47 +212,120 @@ class Client:
             dest_host, dest_port = address
             unpacked_data = struct.unpack("!IIHHII4sHH24s", raw_data)
             headers, raw_data = read_headers(unpacked_data)
-            if not headers.flags.ack:
-                continue
 
-            # SYNACK
-            if headers.flags.syn:
-                ack = attach_headers(self.host, dest_host, self.port, dest_port, headers.ack_num, 0, b'0100', 0)
-                self.sendto(ack, (dest_host, dest_port))
-                print(f"Established connection with server. seq_n={self.next_seq_num} ack_n={self.ack_num}")
+            with self.is_connected_mut:
+                if not self.is_connected:
+                    # SYN
+                    if headers.flags.syn and not headers.flags.ack and not self.received_syn:
+                        print("Received syn")
+                        self.received_syn = True
+                        self.init_ack_num = headers.seq_num + 1
+                        self.ack_num = headers.seq_num + 1
+                        synack = attach_headers(self.host, dest_host, self.port, dest_port, self.init_seq_num, headers.seq_num + 1, b'0110', 0)
+                        self.sendto(synack, (dest_host, dest_port))
+                        with self.next_seq_num_mut:
+                            next_seq_num = self.next_seq_num
+                        with self.waiting_packets_mut:
+                            self.waiting_packets[next_seq_num] = synack, (dest_host, dest_port)
+                            self.next_seq_num += 1
+                        with self.timer_mut:
+                            self.timer = threading.Timer(0.9, self.handle_timer)
+                            self.timer.start()
 
-            ack_num = headers.ack_num
+                    # SYNACK
+                    elif headers.flags.syn and headers.ack_num == self.init_seq_num + 1:
+                        print("Received synack")
+                        self.init_ack_num = headers.seq_num + 1
+                        self.ack_num = headers.seq_num + 1
+                        ack = attach_headers(self.host, dest_host, self.port, dest_port, 0, headers.seq_num + 1, b'0100', 0)
+                        self.sendto(ack, (dest_host, dest_port))
+                        with self.timer_mut:
+                            self.timer.cancel()
+                        with self.next_seq_num_mut:
+                            print(f"Established connection. seq_n={self.next_seq_num} ack_n={self.ack_num}")
+                        self.is_connected = True
 
-            with self.waiting_packets_mut:
-                print("received ack", ack_num)
-                keys_to_remove = [key for key in self.waiting_packets if key < ack_num]
-                for key in keys_to_remove:
-                    del self.waiting_packets[key]
+                    # Handshake ACK
+                    elif headers.ack_num == self.init_seq_num + 1:
+                        print("Received handshake ack")
+                        with self.waiting_packets_mut:
+                            del self.waiting_packets[self.init_seq_num]
+                            with self.timer_mut:
+                                self.timer.cancel()
+                        with self.next_seq_num_mut:
+                            print(f"Established connection. seq_n={self.next_seq_num} ack_n={self.ack_num}")
+                        self.is_connected = True
 
-            self.waiting_packets_sig.set()
-
-            with self.waiting_packets_mut:
-                if len(self.waiting_packets) > 0:
-                    print("Restarting timer after receiving ack")
-                    with self.timer_mut:
-                        self.timer.cancel()
-                        self.timer = threading.Timer(0.9, self.handle_timer)
-                        self.timer.start()
                 else:
-                    print("Stopping timer")
-                    with self.timer_mut:
-                        self.timer.cancel()
+                    # Received wrong packet
+                    if headers.seq_num != self.ack_num:
+                        with self.next_seq_num_mut:
+                            ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', 0)
+                        self.sendto(ack, (dest_host, dest_port))
+                        continue
+
+                    # Received data
+                    if not headers.flags.ack:
+                        self.buffer += raw_data
+                        self.ack_num += len(raw_data)
+
+                        # Obtained full msg
+                        if chr(self.buffer[-1]) == "\r":
+                            print("msg from client:", self.buffer.decode())
+                            self.buffer = b""
+
+                        with self.next_seq_num_mut:
+                            ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', 0)
+                        self.sendto(ack, (dest_host, dest_port))
+
+                    # Received ack
+                    else:
+                        ack_num = headers.ack_num
+
+                        with self.waiting_packets_mut:
+                            print("received ack", ack_num)
+                            keys_to_remove = [key for key in self.waiting_packets if key < ack_num]
+                            for key in keys_to_remove:
+                                del self.waiting_packets[key]
+
+                        self.waiting_packets_sig.set()
+
+                        with self.waiting_packets_mut:
+                            if len(self.waiting_packets) > 0:
+                                print("Restarting timer")
+                                with self.timer_mut:
+                                    self.timer.cancel()
+                                    self.timer = threading.Timer(0.9, self.handle_timer)
+                                    self.timer.start()
+                            else:
+                                print("Stopping timer")
+                                with self.timer_mut:
+                                    self.timer.cancel()
 
     def handle_input(self):
         while True:
-            val = input("msg: ")
-            val += "\r"
-            input_bytes = val.encode()
-            
-            with self.stream_mut:
-                self.stream.write(input_bytes)
+            val = input("")
 
-            self.waiting_packets_sig.set()
+            if val == "!connect":
+                syn = attach_headers(self.host, self.dest_host, self.port, self.dest_port, 0, 0, b'0010', 0)
+                with self.waiting_packets_mut:
+                    self.waiting_packets[self.next_seq_num] = syn, (self.dest_host, self.dest_port)
+                    self.next_seq_num += 1
+                    self.sendto(syn, (self.dest_host, self.dest_port))
+                    with self.timer_mut:
+                        self.timer = threading.Timer(0.9, self.handle_timer)
+                        self.timer.start()
+            else:
+                val += "\r"
+                input_bytes = val.encode()
+                with self.stream_mut:
+                    self.stream.write(input_bytes)
+
+                with self.is_connected_mut:
+                    if self.is_connected:
+                        self.waiting_packets_sig.set()
+                    else:
+                        print("Not Connected!. Type !connect to initialize handshake")
 
 
     """
@@ -329,25 +337,6 @@ class Client:
             return self.socket.sendto(readableBuffer, address)
         return -1
 
-    def handshake_send(self, msg: bytes, dest_host: str, dest_port: int, wait_for_ack: bool):
-        # print("Message being sent is: ", msg)
-        self.socket.sendto(msg, (dest_host, dest_port))
-        ack = not wait_for_ack
-        while not ack:
-            msg, _ = self.socket.recvfrom(4096)
-            if msg:
-                unpacked_msg = struct.unpack("!IIHHII4sHH24s", msg)
-                headers, msg_rcvd = read_headers(unpacked_msg)
-
-                # --- Do checksum
-
-                self.next_seq_num = headers.ack_num
-
-                # check for synack
-                if headers.flags.syn and headers.flags.ack:
-                    print("Synack is good!")
-        # -------------------------Check ACK corresponds here----------------------------------------
-                ack = True
 
 """
 Handshaking:
