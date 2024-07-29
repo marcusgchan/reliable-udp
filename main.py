@@ -109,7 +109,11 @@ def read_headers(data: tuple[Any, ...]) -> tuple[Header, bytes]:
 class Server:
     def __init__(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.expected_seq = 0 # next seq expected from client
+        self.next_seq_num = 0
+        self.init_seq_num = 0
+        self.ack_num = 0 # next seq expected from client
+
+        self.timer = threading.Timer(0.9, self.handle_timer)
 
     def listen(self, host: str, port: int):
         self.socket.bind((host, port))
@@ -130,19 +134,22 @@ class Server:
             """
             if headers.flags.syn:
                 print("RECEIVED A SYN")
-                newmsg = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, headers.seq_num + 1, b'0110', 500, b"Sending SYNACK")
-                self.expected_seq = headers.seq_num + 1
-                self.socket.sendto(newmsg, sender)
+                synack = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, self.next_seq_num, headers.seq_num + 1, b'0110', 500)
+                self.next_seq_num += 1
+                self.ack_num = headers.seq_num + 1
+                self.socket.sendto(synack, sender)
+                self.timer.start()
                 continue
-            if headers.flags.ack:
+
+            if headers.flags.ack and headers.seq_num == self.init_seq_num + 1:
                 print("Established connection with", sender)
                 continue
 
             print(f"Received packet with seq,", headers.seq_num)
 
-            if headers.seq_num != self.expected_seq:
-                print(f"Received unexpected ack received={headers.seq_num} expected={self.expected_seq}")
-                ack = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, self.expected_seq, b'0100', 500)
+            if headers.seq_num != self.ack_num:
+                print(f"Received unexpected seq_num received={headers.seq_num} expected={self.ack_num}")
+                ack = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, self.ack_num, b'0100', 500)
                 self.socket.sendto(ack, sender)
                 continue
 
@@ -159,7 +166,12 @@ class Server:
             # Send ack
             ack_packet = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, 0, headers.seq_num + len(raw_data), b'0100', 500)
             self.socket.sendto(ack_packet, sender)
-            self.expected_seq = headers.seq_num + len(raw_data)
+            self.ack_num = headers.seq_num + len(raw_data)
+
+    def handle_timer(self):
+        synack = attach_headers("127.0.0.1", "192.168.1.102", 8000, 80, self.init_seq_num, self.ack_num, b'0110', 500)
+        # self.socket.sendto(synack, sender)
+        
 
 
 class Client:
@@ -179,25 +191,32 @@ class Client:
 
         self.next_seq_num = 0
 
+        self.init_seq_num = 0
+
         self.ack_num = 0
         self.window_size = 6
         self.mss = 2  # we can set the MSS using a flag from the server but yeah
         # Track seq nums and ACK #
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
+        self.host = host
+        self.port = port
+
         self.socket.bind((host, port))
-
-        # After binding, proceed to handshaking
-        syn = attach_headers(host, dest_host, port, dest_port, 0, 0, b'0010', 0)
-        self.handshake_send(syn, dest_host, dest_port, True)
-        ack = attach_headers(host, dest_host, port, dest_port, self.next_seq_num, 0, b'0100', 0)
-        self.handshake_send(ack, dest_host, dest_port, False)
-
-        print(f"Finished handshake. seq_n={self.next_seq_num} ack_n={self.ack_num}")
 
         # Spawn new thread for receving acks
         recv_thread = threading.Thread(target=self.handle_acks)
         recv_thread.start()
+
+        # After binding, proceed to handshaking
+        syn = attach_headers(host, dest_host, port, dest_port, 0, 0, b'0010', 0)
+        with self.waiting_packets_mut:
+            self.waiting_packets[self.next_seq_num] = syn, (dest_host, dest_port)
+            self.next_seq_num += 1
+            self.sendto(syn, (dest_host, dest_port))
+            with self.timer_mut:
+                self.timer = threading.Timer(0.9, self.handle_timer)
+                self.timer.start()
 
         # Spawn thread for user input
         input_thread = threading.Thread(target=self.handle_input)
@@ -224,6 +243,7 @@ class Client:
                 
                 packet_seq_num = self.next_seq_num
                 self.next_seq_num += len(body)
+
                 print(f"sending data={body} seq_num={packet_seq_num}")
 
                 packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
@@ -253,11 +273,18 @@ class Client:
 
     def handle_acks(self):
         while True:
-            raw_data, _ = self.socket.recvfrom(4096)
+            raw_data, address = self.socket.recvfrom(4096)
+            dest_host, dest_port = address
             unpacked_data = struct.unpack("!IIHHII4sHH24s", raw_data)
             headers, raw_data = read_headers(unpacked_data)
             if not headers.flags.ack:
                 continue
+
+            # SYNACK
+            if headers.flags.syn:
+                ack = attach_headers(self.host, dest_host, self.port, dest_port, headers.ack_num, 0, b'0100', 0)
+                self.sendto(ack, (dest_host, dest_port))
+                print(f"Established connection with server. seq_n={self.next_seq_num} ack_n={self.ack_num}")
 
             ack_num = headers.ack_num
 
