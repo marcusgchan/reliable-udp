@@ -306,8 +306,11 @@ class Client:
         while True:
             val = input("")
 
+            with self.is_connected_mut:
+                is_connected = self.is_connected
+
             if val == "!connect":
-                syn = attach_headers(self.host, self.dest_host, self.port, self.dest_port, 0, 0, b'0010', 0)
+                syn = attach_headers(self.host, self.dest_host, self.port, self.dest_port, self.init_seq_num, 0, b'0010', self.max_buffer_size)
                 with self.waiting_packets_mut:
                     self.waiting_packets[self.next_seq_num] = syn, (self.dest_host, self.dest_port)
                     self.next_seq_num += 1
@@ -315,17 +318,14 @@ class Client:
                     with self.timer_mut:
                         self.timer = threading.Timer(0.9, self.handle_timer)
                         self.timer.start()
+            elif not is_connected:
+                print("Not Connected!. Type !connect to initialize handshake")
             else:
                 val += "\r"
                 input_bytes = val.encode()
                 with self.stream_mut:
                     self.stream.write(input_bytes)
-
-                with self.is_connected_mut:
-                    if self.is_connected:
-                        self.waiting_packets_sig.set()
-                    else:
-                        print("Not Connected!. Type !connect to initialize handshake")
+                self.waiting_packets_sig.set()
 
 
     """
