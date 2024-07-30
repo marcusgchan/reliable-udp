@@ -169,7 +169,6 @@ class Client:
                 with self.rwnd_mut:
                     if min(cwnd, self.rwnd) > self.mss:
                         remaining_spots = int(min(cwnd, self.rwnd) // self.mss) - len(self.waiting_packets)
-                        print("remaining_spots", remaining_spots)
                         bytes_to_read = remaining_spots * self.mss
                     else:
                         remaining_spots = min(cwnd, self.rwnd)
