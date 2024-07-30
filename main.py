@@ -139,6 +139,7 @@ class Client:
         self.mss = 2  # we can set the MSS using a flag from the server but yeah
 
         self.buffer = b""
+        self.max_buffer_size = 10
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
         self.host = host
