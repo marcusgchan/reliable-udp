@@ -337,12 +337,12 @@ class Client:
                                         # Congestion avoidance
                                         if self.ssthresh >= self.cwnd:
                                             if self.cwnd + self.mss * (self.mss / self.cwnd) <= self.rwnd:
-                                                print("Congestion avoidance...")
+                                                print(f"Congestion avoidance... Additive increase. cwnd={self.cwnd}")
                                                 self.cwnd += self.mss * (self.mss / self.cwnd)
                                         else:
                                             if self.cwnd + self.mss <= self.rwnd:
                                                 self.cwnd += self.mss
-                                                print(f"Additive increase. cwnd={self.cwnd}")
+                                                print(f"Slow start. Adding mms to cwnd cwnd={self.cwnd}")
 
                             self.waiting_packets_sig.set()
 
