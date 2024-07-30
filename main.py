@@ -141,6 +141,7 @@ class Client:
         self.ssthresh_mut = threading.Lock()
 
         self.buffer = b""
+        self.buffer_mut = threading.Lock()
         self.max_buffer_size = 256
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
@@ -193,7 +194,8 @@ class Client:
 
                 print(f"sending data={body} seq_num={packet_seq_num}")
 
-                packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', 0, body)
+                with self.buffer_mut:
+                    packet = attach_headers(host, dest_host, port, dest_port, packet_seq_num, self.ack_num, b'0000', self.max_buffer_size -  len(self.buffer), body)
 
                 with self.waiting_packets_mut:
                     self.waiting_packets[packet_seq_num] = packet, (dest_host, dest_port)
@@ -278,82 +280,83 @@ class Client:
                         self.is_connected = True
 
                 else:
-                    # Received wrong packet
-                    if headers.seq_num != self.ack_num:
-                        with self.next_seq_num_mut:
-                            ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', self.max_buffer_size - len(self.buffer))
-                        self.sendto(ack, (dest_host, dest_port))
-                        continue
+                    with self.buffer_mut:
+                        # Received wrong packet
+                        if headers.seq_num != self.ack_num:
+                            with self.next_seq_num_mut:
+                                ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', self.max_buffer_size - len(self.buffer))
+                            self.sendto(ack, (dest_host, dest_port))
+                            continue
 
-                    # Received data
-                    if not headers.flags.ack:
-                        with self.rwnd_mut:
-                            self.rwnd = headers.window
+                        # Received data
+                        if not headers.flags.ack:
+                            with self.rwnd_mut:
+                                self.rwnd = headers.window
 
-                        # Flow control
-                        print(f"buffer_len={len(self.buffer)} received_len={len(raw_data)}")
-                        if len(self.buffer) + len(raw_data) > self.max_buffer_size:
-                            print("buffer before overflow", self.buffer)
-                            overflow = len(self.buffer) + len(raw_data) - self.max_buffer_size
-                            # drop bytes from start of buffer (simple but bad flow control algo)
-                            self.buffer = self.buffer[overflow:]
-                            print("Buffer overflowing! Truncating start of buffer")
+                            # Flow control
+                            print(f"buffer_len={len(self.buffer)} received_len={len(raw_data)}")
+                            if len(self.buffer) + len(raw_data) > self.max_buffer_size:
+                                print("buffer before overflow", self.buffer)
+                                overflow = len(self.buffer) + len(raw_data) - self.max_buffer_size
+                                # drop bytes from start of buffer (simple but bad flow control algo)
+                                self.buffer = self.buffer[overflow:]
+                                print("Buffer overflowing! Truncating start of buffer")
 
-                        self.buffer += raw_data
-                        self.ack_num += len(raw_data)
+                            self.buffer += raw_data
+                            self.ack_num += len(raw_data)
 
-                        # Obtained full msg
-                        if chr(self.buffer[-1]) == "\r":
-                            print("msg from client:", self.buffer.decode())
-                            self.buffer = b""
+                            # Obtained full msg
+                            if chr(self.buffer[-1]) == "\r":
+                                print("msg from client:", self.buffer.decode())
+                                self.buffer = b""
 
-                        buffer_space = self.max_buffer_size - len(self.buffer)
+                            buffer_space = self.max_buffer_size - len(self.buffer)
 
-                        # set buffer to 1 if there's no space as a simple measure to prevent deadlock
-                        window = 1 if buffer_space == 0 else buffer_space
+                            # set buffer to 1 if there's no space as a simple measure to prevent deadlock
+                            window = 1 if buffer_space == 0 else buffer_space
 
-                        with self.next_seq_num_mut:
-                            ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', window)
-                        self.sendto(ack, (dest_host, dest_port))
+                            with self.next_seq_num_mut:
+                                ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', window)
+                            self.sendto(ack, (dest_host, dest_port))
 
-                    # Received ack
-                    else:
-                        with self.rwnd_mut:
-                            self.rwnd = headers.window
-                        ack_num = headers.ack_num
+                        # Received ack
+                        else:
+                            with self.rwnd_mut:
+                                self.rwnd = headers.window
+                            ack_num = headers.ack_num
 
-                        with self.waiting_packets_mut:
-                            keys_to_remove = [key for key in self.waiting_packets if key < ack_num]
-                            for key in keys_to_remove:
-                                del self.waiting_packets[key]
+                            with self.waiting_packets_mut:
+                                keys_to_remove = [key for key in self.waiting_packets if key < ack_num]
+                                for key in keys_to_remove:
+                                    del self.waiting_packets[key]
 
-                        # Congestion control
-                        with self.cwnd_mut:
-                            with self.ssthresh_mut:
-                                with self.rwnd_mut:
-                                    # Congestion avoidance
-                                    if self.ssthresh >= self.cwnd:
-                                        if self.cwnd + self.mss * (self.mss / self.cwnd) <= self.rwnd:
-                                            print("Congestion avoidance...")
-                                            self.cwnd += self.mss * (self.mss / self.cwnd)
-                                    else:
-                                        if self.cwnd + self.mss <= self.rwnd:
-                                            self.cwnd += self.mss
-                                            print(f"Additive increase. cwnd={self.cwnd}")
+                            # Congestion control
+                            with self.cwnd_mut:
+                                with self.ssthresh_mut:
+                                    with self.rwnd_mut:
+                                        # Congestion avoidance
+                                        if self.ssthresh >= self.cwnd:
+                                            if self.cwnd + self.mss * (self.mss / self.cwnd) <= self.rwnd:
+                                                print("Congestion avoidance...")
+                                                self.cwnd += self.mss * (self.mss / self.cwnd)
+                                        else:
+                                            if self.cwnd + self.mss <= self.rwnd:
+                                                self.cwnd += self.mss
+                                                print(f"Additive increase. cwnd={self.cwnd}")
 
-                        self.waiting_packets_sig.set()
+                            self.waiting_packets_sig.set()
 
-                        with self.waiting_packets_mut:
-                            if len(self.waiting_packets) > 0:
-                                print("Restarting timer")
-                                with self.timer_mut:
-                                    self.timer.cancel()
-                                    self.timer = threading.Timer(0.9, self.handle_timer)
-                                    self.timer.start()
-                            else:
-                                print("Stopping timer")
-                                with self.timer_mut:
-                                    self.timer.cancel()
+                            with self.waiting_packets_mut:
+                                if len(self.waiting_packets) > 0:
+                                    print("Restarting timer")
+                                    with self.timer_mut:
+                                        self.timer.cancel()
+                                        self.timer = threading.Timer(0.9, self.handle_timer)
+                                        self.timer.start()
+                                else:
+                                    print("Stopping timer")
+                                    with self.timer_mut:
+                                        self.timer.cancel()
 
     def handle_input(self):
         while True:
@@ -365,12 +368,13 @@ class Client:
             if val == "!connect":
                 syn = attach_headers(self.host, self.dest_host, self.port, self.dest_port, self.init_seq_num, 0, b'0010', self.max_buffer_size)
                 with self.waiting_packets_mut:
-                    self.waiting_packets[self.next_seq_num] = syn, (self.dest_host, self.dest_port)
-                    self.next_seq_num += 1
-                    self.sendto(syn, (self.dest_host, self.dest_port))
-                    with self.timer_mut:
-                        self.timer = threading.Timer(0.9, self.handle_timer)
-                        self.timer.start()
+                    with self.next_seq_num_mut:
+                        self.waiting_packets[self.next_seq_num] = syn, (self.dest_host, self.dest_port)
+                        self.next_seq_num += 1
+                        self.sendto(syn, (self.dest_host, self.dest_port))
+                        with self.timer_mut:
+                            self.timer = threading.Timer(0.9, self.handle_timer)
+                            self.timer.start()
             elif not is_connected:
                 print("Not Connected!. Type !connect to initialize handshake")
             else:
