@@ -149,7 +149,7 @@ class Client:
         self.socket.bind((host, port))
 
         # Spawn new thread for receving acks
-        recv_thread = threading.Thread(target=self.handle_acks)
+        recv_thread = threading.Thread(target=self.handle_receive)
         recv_thread.start()
 
         # Spawn thread for user input
@@ -206,7 +206,7 @@ class Client:
             self.timer = threading.Timer(0.9, self.handle_timer)
             self.timer.start()
 
-    def handle_acks(self):
+    def handle_receive(self):
         while True:
             raw_data, address = self.socket.recvfrom(4096)
             dest_host, dest_port = address
