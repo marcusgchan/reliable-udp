@@ -130,11 +130,18 @@ class Client:
         self.received_syn = False
 
         self.rwnd = 6 # receiver window size
+        self.rwnd_mut = threading.Lock()
+
         self.cwnd = 6 # window size
+        self.cwnd_mut = threading.Lock()
+
         self.mss = 2  # we can set the MSS using a flag from the server but yeah
 
+        self.ssthresh = 10
+        self.ssthresh_mut = threading.Lock()
+
         self.buffer = b""
-        self.max_buffer_size = 6
+        self.max_buffer_size = 256
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
         self.host = host
@@ -155,13 +162,18 @@ class Client:
         while True:
             self.waiting_packets_sig.wait()
 
+            with self.cwnd_mut:
+                cwnd = self.cwnd
+
             with self.waiting_packets_mut:
-                if min(self.cwnd, self.rwnd) > self.mss:
-                    remaining_spots = min(self.cwnd, self.rwnd) // self.mss - len(self.waiting_packets)
-                    bytes_to_read = remaining_spots * self.mss
-                else:
-                    remaining_spots = min(self.cwnd, self.rwnd)
-                    bytes_to_read = remaining_spots
+                with self.rwnd_mut:
+                    if min(cwnd, self.rwnd) > self.mss:
+                        remaining_spots = int(min(cwnd, self.rwnd) // self.mss) - len(self.waiting_packets)
+                        print("remaining_spots", remaining_spots)
+                        bytes_to_read = remaining_spots * self.mss
+                    else:
+                        remaining_spots = min(cwnd, self.rwnd)
+                        bytes_to_read = remaining_spots
 
             with self.stream_mut:
                 self.stream.seek(self.stream_index)
@@ -197,7 +209,14 @@ class Client:
 
 
     def handle_timer(self):
-        print("Timer ran out... Resending packets")
+        print("Timer ran out... Resending packets. halfing sstresh and setting cwnd back to MMS")
+
+        # Congestion control
+        with self.ssthresh_mut:
+            with self.cwnd_mut:
+                self.ssthresh = min(self.cwnd // 2, 1)
+                self.cwnd = self.mss
+
         with self.waiting_packets_mut:
             for _, value in self.waiting_packets.items():
                 packet, address = value
@@ -269,7 +288,8 @@ class Client:
 
                     # Received data
                     if not headers.flags.ack:
-                        self.rwnd = headers.window
+                        with self.rwnd_mut:
+                            self.rwnd = headers.window
 
                         # Flow control
                         print(f"buffer_len={len(self.buffer)} received_len={len(raw_data)}")
@@ -299,13 +319,28 @@ class Client:
 
                     # Received ack
                     else:
-                        self.rwnd = headers.window
+                        with self.rwnd_mut:
+                            self.rwnd = headers.window
                         ack_num = headers.ack_num
 
                         with self.waiting_packets_mut:
                             keys_to_remove = [key for key in self.waiting_packets if key < ack_num]
                             for key in keys_to_remove:
                                 del self.waiting_packets[key]
+
+                        # Congestion control
+                        with self.cwnd_mut:
+                            with self.ssthresh_mut:
+                                with self.rwnd_mut:
+                                    # Congestion avoidance
+                                    if self.ssthresh >= self.cwnd:
+                                        if self.cwnd + self.mss * (self.mss / self.cwnd) <= self.rwnd:
+                                            print("Congestion avoidance...")
+                                            self.cwnd += self.mss * (self.mss / self.cwnd)
+                                    else:
+                                        if self.cwnd + self.mss <= self.rwnd:
+                                            self.cwnd += self.mss
+                                            print(f"Mupltiplicative increase. cwnd={self.cwnd}")
 
                         self.waiting_packets_sig.set()
 
@@ -351,8 +386,8 @@ class Client:
     Simulate loss
     """
     def sendto(self, readableBuffer: bytes, address: Any) -> int:
-        randint = random.randint(0, 10)
-        if randint > 5:
+        randint = random.randint(1, 10)
+        if randint > 1:
             return self.socket.sendto(readableBuffer, address)
         return -1
 
