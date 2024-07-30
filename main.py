@@ -208,7 +208,7 @@ class Client:
 
 
     def handle_timer(self):
-        print("Timer ran out... Resending packets. halfing sstresh and setting cwnd back to MMS")
+        print("Timer ran out... Resending packets. halfing sstresh and setting cwnd back to MMS (Multiplicative Decrease)")
 
         # Congestion control
         with self.ssthresh_mut:
@@ -339,7 +339,7 @@ class Client:
                                     else:
                                         if self.cwnd + self.mss <= self.rwnd:
                                             self.cwnd += self.mss
-                                            print(f"Mupltiplicative increase. cwnd={self.cwnd}")
+                                            print(f"Additive increase. cwnd={self.cwnd}")
 
                         self.waiting_packets_sig.set()
 
