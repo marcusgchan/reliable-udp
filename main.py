@@ -33,9 +33,7 @@ def main():
     # packet = struct.unpack("!IIHHIIBH24s", encoded_packet)
     # print(packet)
     app_type = sys.argv[1]
-    if app_type == "server":
-        init_server(int(sys.argv[2]))
-    elif app_type == "client":
+    if app_type == "client":
         init_client("127.0.0.1", int(sys.argv[2]), sys.argv[3], int(sys.argv[4]))
 
 
@@ -43,10 +41,6 @@ def init_client(host: str, port: int, dest_host: str, dest_port: int):
     client = Client()
     client.start(host, port, dest_host, dest_port)
 
-
-def init_server(port: int):
-    server = Server()
-    server.listen("127.0.0.1", port)
 
 def divide_binary_string(s: str, n: int):
     return [s[i:i+n] for i in range(0, len(s), n)]
@@ -135,11 +129,12 @@ class Client:
 
         self.received_syn = False
 
-        self.window_size = 6
+        self.rwnd = 6 # receiver window size
+        self.cwnd = 6 # window size
         self.mss = 2  # we can set the MSS using a flag from the server but yeah
 
         self.buffer = b""
-        self.max_buffer_size = 10
+        self.max_buffer_size = 6
 
     def start(self, host: str, port: int, dest_host: str, dest_port: int):
         self.host = host
@@ -161,11 +156,16 @@ class Client:
             self.waiting_packets_sig.wait()
 
             with self.waiting_packets_mut:
-                remaining_spots = self.window_size // self.mss - len(self.waiting_packets)
+                if min(self.cwnd, self.rwnd) > self.mss:
+                    remaining_spots = min(self.cwnd, self.rwnd) // self.mss - len(self.waiting_packets)
+                    bytes_to_read = remaining_spots * self.mss
+                else:
+                    remaining_spots = min(self.cwnd, self.rwnd)
+                    bytes_to_read = remaining_spots
 
             with self.stream_mut:
                 self.stream.seek(self.stream_index)
-                bytes_to_split = self.stream.read(remaining_spots * self.mss)
+                bytes_to_split = self.stream.read(bytes_to_read)
                 if len(bytes_to_split) == 0:
                     self.waiting_packets_sig.clear()
                     continue
@@ -219,10 +219,11 @@ class Client:
                     # SYN
                     if headers.flags.syn and not headers.flags.ack and not self.received_syn:
                         print("Received syn")
+                        self.rwnd = headers.window
                         self.received_syn = True
                         self.init_ack_num = headers.seq_num + 1
                         self.ack_num = headers.seq_num + 1
-                        synack = attach_headers(self.host, dest_host, self.port, dest_port, self.init_seq_num, headers.seq_num + 1, b'0110', 0)
+                        synack = attach_headers(self.host, dest_host, self.port, dest_port, self.init_seq_num, headers.seq_num + 1, b'0110', self.max_buffer_size)
                         self.sendto(synack, (dest_host, dest_port))
                         with self.next_seq_num_mut:
                             next_seq_num = self.next_seq_num
@@ -236,9 +237,10 @@ class Client:
                     # SYNACK
                     elif headers.flags.syn and headers.ack_num == self.init_seq_num + 1:
                         print("Received synack")
+                        self.rwnd = headers.window
                         self.init_ack_num = headers.seq_num + 1
                         self.ack_num = headers.seq_num + 1
-                        ack = attach_headers(self.host, dest_host, self.port, dest_port, 0, headers.seq_num + 1, b'0100', 0)
+                        ack = attach_headers(self.host, dest_host, self.port, dest_port, 0, headers.seq_num + 1, b'0100', self.max_buffer_size)
                         self.sendto(ack, (dest_host, dest_port))
                         with self.timer_mut:
                             self.timer.cancel()
@@ -261,12 +263,23 @@ class Client:
                     # Received wrong packet
                     if headers.seq_num != self.ack_num:
                         with self.next_seq_num_mut:
-                            ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', 0)
+                            ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', self.max_buffer_size - len(self.buffer))
                         self.sendto(ack, (dest_host, dest_port))
                         continue
 
                     # Received data
                     if not headers.flags.ack:
+                        self.rwnd = headers.window
+
+                        # Flow control
+                        print(f"buffer_len={len(self.buffer)} received_len={len(raw_data)}")
+                        if len(self.buffer) + len(raw_data) > self.max_buffer_size:
+                            print("buffer before overflow", self.buffer)
+                            overflow = len(self.buffer) + len(raw_data) - self.max_buffer_size
+                            # drop bytes from start of buffer (simple but bad flow control algo)
+                            self.buffer = self.buffer[overflow:]
+                            print("Buffer overflowing! Truncating start of buffer")
+
                         self.buffer += raw_data
                         self.ack_num += len(raw_data)
 
@@ -275,12 +288,18 @@ class Client:
                             print("msg from client:", self.buffer.decode())
                             self.buffer = b""
 
+                        buffer_space = self.max_buffer_size - len(self.buffer)
+
+                        # set buffer to 1 if there's no space as a simple measure to prevent deadlock
+                        window = 1 if buffer_space == 0 else buffer_space
+
                         with self.next_seq_num_mut:
-                            ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', 0)
+                            ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', window)
                         self.sendto(ack, (dest_host, dest_port))
 
                     # Received ack
                     else:
+                        self.rwnd = headers.window
                         ack_num = headers.ack_num
 
                         with self.waiting_packets_mut:
@@ -331,7 +350,7 @@ class Client:
     """
     Simulate loss
     """
-    def sendto(self, readableBuffer: bytes, address: Any, i=0) -> int:
+    def sendto(self, readableBuffer: bytes, address: Any) -> int:
         randint = random.randint(0, 10)
         if randint > 5:
             return self.socket.sendto(readableBuffer, address)
