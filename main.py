@@ -61,14 +61,24 @@ def binary_to_address(data: int) -> str:
     # Join the decimal numbers with a period
     return '.'.join(addresses)
 
-def attach_headers(src_addr: str, dst_addr: str, src_port: int, dst_port: int, seq: int, ack: int, flags: bytes, window: int, msg = b'') -> bytes:
+def find_checksum(data: bytes) -> int:
+    checksum = sum(data)
+    checksum = (checksum & 0xFFFF)
+    checksum = ~checksum & 0xFFFF
+    return checksum
+
+def checksum_is_equal(data: bytes, checksum: int) -> bool:
+    calc_checksum = find_checksum(data)
+    return calc_checksum == checksum
+
+def attach_headers(src_addr: str, dst_addr: str, src_port: int, dst_port: int, seq: int, ack: int, flags: bytes, window: int, msg = b'', mss=24) -> bytes:
     # Header is: Src_addr(32), Dst_addr(32), Src_port(16), Dst_port(16), seq #(32), ack #(32), Flags(8), Window(16), checksum (16)
     bin_src = address_to_binary(src_addr)
     bin_dst = address_to_binary(dst_addr)
     # -------------------------Calculate checksum here----------------------------------------
-    checksum = 0
+    checksum = find_checksum(msg)
     header = struct.pack("!IIHHII4sHH", bin_src, bin_dst, src_port, dst_port, seq, ack, flags, window, checksum)
-    data = struct.pack("24s", msg) # instead of 24 it would be the MSS
+    data = struct.pack(str(mss)+"s", msg) # instead of 24 it would be the MSS
     packet = header + data
     return packet
 
@@ -90,7 +100,6 @@ def read_headers(data: tuple[Any, ...]) -> tuple[Header, bytes]:
     headers.flags = flags
     headers.window = data[7]
     headers.checksum = data[8]
-    # print("Received from address (in read_headers): ", headers.src_addr)
     raw_data = b"";
     index_of_end = data[9].find(b'\r')
     if index_of_end == -1:
@@ -100,7 +109,11 @@ def read_headers(data: tuple[Any, ...]) -> tuple[Header, bytes]:
         
     return headers, raw_data.rstrip(b"\x00")
 
-        
+def simulate_bitflip(readableBuffer: bytes):
+    flipped_bytes = bytes(~b & 0xFF for b in readableBuffer[-4:])
+    flipped_data = readableBuffer[:-4] + flipped_bytes
+    return flipped_data
+
 class Client:
     def __init__(self) -> None:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -233,7 +246,7 @@ class Client:
             dest_host, dest_port = address
             unpacked_data = struct.unpack("!IIHHII4sHH24s", raw_data)
             headers, raw_data = read_headers(unpacked_data)
-
+            
             with self.is_connected_mut:
                 if not self.is_connected:
                     # SYN
@@ -281,8 +294,8 @@ class Client:
 
                 else:
                     with self.buffer_mut:
-                        # Received wrong packet
-                        if headers.seq_num != self.ack_num:
+                        # Received wrong packet or corrupted packet
+                        if headers.seq_num != self.ack_num or not checksum_is_equal(raw_data, headers.checksum):
                             with self.next_seq_num_mut:
                                 ack = attach_headers(self.host, dest_host, self.port, dest_port, self.next_seq_num, self.ack_num, b'0100', self.max_buffer_size - len(self.buffer))
                             self.sendto(ack, (dest_host, dest_port))
@@ -307,7 +320,7 @@ class Client:
 
                             # Obtained full msg
                             if chr(self.buffer[-1]) == "\r":
-                                print("msg from client:", self.buffer.decode())
+                                print("---->msg from client:", self.buffer.decode())
                                 self.buffer = b""
 
                             buffer_space = self.max_buffer_size - len(self.buffer)
@@ -390,8 +403,13 @@ class Client:
     """
     def sendto(self, readableBuffer: bytes, address: Any) -> int:
         randint = random.randint(1, 10)
-        if randint > 1:
+        if randint > 2:
             return self.socket.sendto(readableBuffer, address)
+        if randint == 2:
+            print("-------SIMULATING BITFLIP------")
+            flipped_buffer = simulate_bitflip(readableBuffer)
+            return self.socket.sendto(flipped_buffer, address)
+        print("-------SIMULATING LOSS------")
         return -1
 
 
